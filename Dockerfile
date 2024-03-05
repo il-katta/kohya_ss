@@ -75,6 +75,11 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+RUN --mount=type=cache,id=apt-$TARGETARCH$TARGETVARIANT,sharing=locked,target=/var/lib/apt/lists/ \ 
+    set -x && \
+    apt-get -qq update && \
+    apt-get install -qq -y openssh-server tmux --no-install-recommends
+
 # Fix missing libnvinfer7
 RUN ln -s /usr/lib/x86_64-linux-gnu/libnvinfer.so /usr/lib/x86_64-linux-gnu/libnvinfer.so.7 && \
     ln -s /usr/lib/x86_64-linux-gnu/libnvinfer_plugin.so /usr/lib/x86_64-linux-gnu/libnvinfer_plugin.so.7
@@ -98,6 +103,13 @@ COPY --chown=$UID:0 --chmod=775 . .
 # Copy licenses (OpenShift Policy)
 COPY --chmod=775 LICENSE.md /licenses/LICENSE.md
 
+ADD docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN set -x && \
+    chmod 0755 /usr/local/bin/docker-entrypoint.sh
+RUN echo "PermitRootLogin prohibit-password" >> /etc/ssh/sshd_config && \
+    mkdir /var/run/sshd && \
+    echo "root:root" | chpasswd
+
 ENV PATH="/home/$UID/.local/bin:$PATH"
 ENV PYTHONPATH="${PYTHONPATH}:/home/$UID/.local/lib/python3.10/site-packages" 
 ENV LD_PRELOAD=libtcmalloc.so
@@ -109,10 +121,11 @@ VOLUME [ "/dataset" ]
 # 6006: TensorBoard
 EXPOSE 7860 6006
 
+ENV UID=$UID
 USER $UID
 
 STOPSIGNAL SIGINT
 
 # Use dumb-init as PID 1 to handle signals properly
-ENTRYPOINT ["dumb-init", "--"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python3", "kohya_gui.py", "--listen", "0.0.0.0", "--server_port", "7860"]
