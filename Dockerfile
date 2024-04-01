@@ -1,5 +1,4 @@
 # syntax=docker/dockerfile:1
-ARG UID=1000
 ARG VERSION=EDGE
 ARG RELEASE=0
 
@@ -17,10 +16,10 @@ ARG PIP_NO_WARN_SCRIPT_LOCATION=0
 ARG PIP_ROOT_USER_ACTION="ignore"
 
 # Install build dependencies
-RUN apt-get update && apt-get upgrade -y && \
+RUN --mount=type=cache,id=apt-$TARGETARCH$TARGETVARIANT,sharing=locked,target=/var/lib/apt/lists \
+    apt-get update && apt-get upgrade -y && \
     apt-get install -y --no-install-recommends python3-launchpadlib git curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean
 
 # Install PyTorch and TensorFlow
 # The versions must align and be in sync with the requirements_linux_docker.txt
@@ -44,7 +43,8 @@ RUN --mount=type=cache,id=pip-$TARGETARCH$TARGETVARIANT,sharing=locked,target=/r
 # Replace pillow with pillow-simd (Only for x86)
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-    apt-get update && apt-get install -y --no-install-recommends zlib1g-dev libjpeg62-turbo-dev build-essential && \
+    apt-get -qq update && \
+    apt-get install -y --no-install-recommends zlib1g-dev libjpeg62-turbo-dev build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     pip uninstall -y pillow && \
@@ -53,7 +53,6 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
 
 FROM python:3.10-slim as final
 
-ARG UID
 ARG VERSION
 ARG RELEASE
 
@@ -70,10 +69,11 @@ LABEL name="bmaltais/kohya_ss" \
     description="The GUI allows you to set the training parameters and generate and run the required CLI commands to train the model. This is the docker image for Kohya's GUI. For more information about this tool, please visit the following website: https://github.com/bmaltais/kohya_ss."
 
 # Install runtime dependencies
-RUN apt-get update && \
+RUN --mount=type=cache,id=apt-$TARGETARCH$TARGETVARIANT,sharing=locked,target=/var/lib/apt/lists \
+    apt-get -qq update && \
     apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libjpeg62 libtcl8.6 libtk8.6 libgoogle-perftools-dev dumb-init && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends rsync git htop wget curl && \
+    apt-get clean
 
 RUN --mount=type=cache,id=apt-$TARGETARCH$TARGETVARIANT,sharing=locked,target=/var/lib/apt/lists/ \ 
     set -x && \
@@ -84,21 +84,18 @@ RUN --mount=type=cache,id=apt-$TARGETARCH$TARGETVARIANT,sharing=locked,target=/v
 RUN ln -s /usr/lib/x86_64-linux-gnu/libnvinfer.so /usr/lib/x86_64-linux-gnu/libnvinfer.so.7 && \
     ln -s /usr/lib/x86_64-linux-gnu/libnvinfer_plugin.so /usr/lib/x86_64-linux-gnu/libnvinfer_plugin.so.7
 
-# Create user
-RUN groupadd -g $UID $UID && \
-    useradd -l -u $UID -g $UID -m -s /bin/sh -N $UID
+
 
 # Create directories with correct permissions
-RUN install -d -m 775 -o $UID -g 0 /dataset && \
-    install -d -m 775 -o $UID -g 0 /licenses && \
-    install -d -m 775 -o $UID -g 0 /app
+RUN install -d -m 775 -o 0 -g 0 /dataset && \
+    install -d -m 775 -o 0 -g 0 /licenses && \
+    install -d -m 775 -o 0 -g 0 /app
 
-# Copy dist and support arbitrary user ids (OpenShift best practice)
-COPY --chown=$UID:0 --chmod=775 \
-    --from=build /root/.local /home/$UID/.local
+COPY --chown=0:0 --chmod=775 \
+    --from=build /root/.local /root/.local
 
 WORKDIR /app
-COPY --chown=$UID:0 --chmod=775 . .
+COPY --chown=0:0 --chmod=775 . .
 
 # Copy licenses (OpenShift Policy)
 COPY --chmod=775 LICENSE.md /licenses/LICENSE.md
@@ -110,20 +107,22 @@ RUN echo "PermitRootLogin prohibit-password" >> /etc/ssh/sshd_config && \
     mkdir /var/run/sshd && \
     echo "root:root" | chpasswd
 
-ENV PATH="/home/$UID/.local/bin:$PATH"
-ENV PYTHONPATH="${PYTHONPATH}:/home/$UID/.local/lib/python3.10/site-packages" 
+ENV PATH="/root/.local/bin:$PATH"
+ENV PYTHONPATH="${PYTHONPATH}:/root/.local/lib/python3.10/site-packages" 
 ENV LD_PRELOAD=libtcmalloc.so
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-
+RUN cat <<EOF > /etc/profile.d/00-env.sh
+export PATH="/root/.local/bin:\$PATH"
+export PYTHONPATH="\${PYTHONPATH}:/root/.local/lib/python3.10/site-packages"
+export LD_PRELOAD=libtcmalloc.so
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+EOF
 VOLUME [ "/dataset" ]
 
 # 7860: Kohya GUI
 # 6006: TensorBoard
-EXPOSE 7860 6006
-
-ENV UID=$UID
-#USER $UID
-USER root
+# 22: SSH
+EXPOSE 7860 6006 22
 
 STOPSIGNAL SIGINT
 
